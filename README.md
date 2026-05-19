@@ -1,103 +1,112 @@
 # link2obsidian 🔗→📝
 
-Convert web page links to Obsidian Markdown files. Automatically fetches content, downloads images, and generates properly formatted Markdown with YAML frontmatter for your Obsidian vault.
+**Convert web page links to Obsidian Markdown files** — auto-download images, smart tagging, and LLM-generated summaries.
+
+Fully supports WeChat public account articles with cookie-based image download and token expiry retry logic.
 
 ## Features
 
-- 🌐 **Universal web clipper** — Convert any webpage to an Obsidian note
-- 📱 **WeChat articles** — Full support for WeChat public account articles (both legacy and 2026+ Vue.js structure)
-- 🖼️ **Auto image download** — Downloads images to `Clippings/images/` with MD5-hashed filenames
-- 🏷️ **Smart tagging** — Auto-tags based on source (微信公众号, 知乎, 网页收藏)
-- 📋 **YAML frontmatter** — Title, source URL, date, and tags
-- 🖥️ **Display mode** — Output to stdout instead of saving (useful for piping)
+- 📱 **WeChat articles** — Extracts even from "environment异常" verification pages
+- 🖼️ **Cookie-based image download** — Uses cookie jar + Referer header for WeChat qpic.cn images
+- 🔄 **Token expiry retry** — Automatically re-fetches page when image tokens expire
+- 🤖 **LLM summary** — Generates 3-5 key bullet points using any OpenAI-compatible API
+- 🏷️ **Smart tagging** — Auto-tags: 微信公众号, 知乎, or 网页收藏
+- 📋 **YAML frontmatter** — Title, source URL, description, tags, created time
 
 ## Requirements
 
 - Python 3.7+
 - `curl` (for fetching pages and downloading images)
+- `pyyaml` (only needed if you want `runner.py` to read YAML-based configs)
+- LLM API key (optional — for summary generation)
 
-## Installation
+## Quick Start
 
 ```bash
 # Clone the repo
 git clone https://github.com/thousandcents/link2obsidian.git
 cd link2obsidian
 
-# Make it executable
-chmod +x link2obsidian.py
-
-# Optional: install as a system command
-ln -s "$(pwd)/link2obsidian.py" ~/.local/bin/link2obsidian
-```
-
-## Usage
-
-### Basic usage
-
-```bash
-# Set your Obsidian vault path
+# Set your Obsidian vault
 export OBSIDIAN_VAULT=/path/to/your/obsidian/vault
 
-# Convert a webpage
-python3 link2obsidian.py https://example.com/article
+# Optional: set LLM API key for summary generation
+export LLM_API_KEY=sk-your-key-here
+export LLM_BASE_URL=https://api.openai.com/v1
+export LLM_MODEL=gpt-4o-mini
 
-# Or specify vault directory inline
-python3 link2obsidian.py https://example.com/article --dir /path/to/obsidian/vault
+# Run it
+python3 runner.py https://mp.weixin.qq.com/s/xxxxxx
 ```
 
-### Display mode (stdout only, no file saved)
+## Environment Variables
 
-```bash
-python3 link2obsidian.py https://example.com/article --display
-```
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `OBSIDIAN_VAULT` | No | `~/Obsidian/Thousand` | Obsidian vault root directory |
+| `LLM_API_KEY` | No | — | API key for LLM summary generation |
+| `LLM_BASE_URL` | No | `https://api.openai.com/v1` | LLM API endpoint |
+| `LLM_MODEL` | No | `gpt-4o-mini` | LLM model name |
 
-### WeChat article support
-
-```bash
-python3 link2obsidian.py https://mp.weixin.qq.com/s/xxxxxx
-```
-
-The script automatically detects WeChat articles and uses the appropriate extraction method (new Vue.js-based structure or legacy HTML structure).
-
-## Output structure
+## Output
 
 ```
 /path/to/obsidian/vault/
 ├── Clippings/
-│   ├── Article Title.md
-│   └── Another Article.md
+│   └── 文章标题.md
 └── Clippings/images/
-    ├── a1b2c3d4e5f6...jpg
-    └── f6e5d4c3b2a1...png
+    ├── img_01.jpg
+    └── img_02.png
 ```
 
-### Output format
+### Output Format
 
 ```markdown
 ---
-title: Article Title
-source: https://example.com/article
-date: 2026-05-19
+source: 微信公众号
+title: 文章标题
+description: 文章描述
 tags:
-  - 网页收藏
+  - 微信公众号
+created: 2026-05-19 14:30:00
+url: https://mp.weixin.qq.com/s/xxxxxx
 ---
 
-# Article Title
+> 📌 **文章要点**
+> - 要点一
+> - 要点二
 
-> 作者：Author Name | 发布时间：2026-05-18
-
-Article content in Markdown...
-
-![[Clippings/images/a1b2c3d4e5f6...jpg]]
+正文内容...
 ```
+
+## How It Works
+
+1. **runner.py** reads `SKILL.md`, extracts the embedded Python code
+2. Injects LLM configuration from environment variables
+3. Replaces the URL placeholder with the target URL
+4. Executes the code dynamically
+
+This design allows the code to evolve alongside the SKILL.md documentation — the code always matches the documented workflow.
+
+## WeChat Article Handling
+
+- Even when WeChat returns a verification page, the article body is still present in `<div id="js_content">`
+- Images from `qpic.cn` require both cookie and `Referer: https://mp.weixin.qq.com/` headers
+- If images fail to download (token expired), the script re-fetches the page to get fresh URLs
+- Desktop Chrome User-Agent is required; mobile UA triggers stricter verification
 
 ## As a Hermes Agent Skill
 
-This project originated as a skill for [Hermes Agent](https://hermes-agent.nousresearch.com). To use it as a Hermes skill:
+This project is designed as a [Hermes Agent](https://hermes-agent.nousresearch.com) skill:
 
-1. Copy `link2obsidian.py` to your skills directory
-2. Configure the skill in `config.yaml` with appropriate execution command
-3. Set `OBSIDIAN_VAULT` environment variable in your `.env`
+```yaml
+# ~/.hermes/config.yaml
+skills:
+  link2obsidian:
+    path: ~/.hermes/skills/link2obsidian/runner.py
+```
+
+Set `OBSIDIAN_VAULT` and `LLM_API_KEY` in your Hermes `.env` file.
 
 ## License
 
