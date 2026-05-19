@@ -1,0 +1,317 @@
+┌─────────────────────────────────────────────────────────┐
+│                                                         │
+│   link2obsidian — 安装说明                             │
+│   将网页链接转换为 Obsidian Markdown 文件               │
+│   支持微信公众号文章、自动下载图片、LLM 摘要生成       │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+
+本文件面向两种使用场景：
+  A) 作为 Hermes Agent 技能安装（推荐）
+  B) 作为独立命令行工具使用
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+目录：
+  1. 前置依赖
+  2. 场景 A：Hermes Agent 技能安装
+  3. 场景 B：独立命令行工具使用
+  4. 配置详解
+  5. 验证安装
+  6. 首次使用示例
+  7. 常见问题
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. 前置依赖
+══════════════════════════════════════════════════════════
+
+  ☑ Python 3.7 或更高版本
+  ☑ curl（用于抓取网页和下载图片）
+  ☑ git（用于克隆仓库）
+  ☑ pip（Python 包管理器，安装 pyyaml）
+  ☑ [可选] Obsidian 笔记软件（用于查看生成的 Markdown）
+  ☑ [可选] LLM API Key（用于自动生成文章摘要）
+  ☑ [可选] Hermes Agent 环境（仅场景 A 需要）
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+2. 场景 A：Hermes Agent 技能安装
+══════════════════════════════════════════════════════════
+
+  Step 1 — 克隆仓库到技能目录
+  ────────────────────────────
+
+      cd ~/.hermes/skills/
+      git clone https://github.com/thousandcents/link2obsidian.git
+
+  技能将被安装到 ~/.hermes/skills/link2obsidian/
+
+  Step 2 — 安装 Python 依赖
+  ──────────────────────────
+
+  Hermes 默认 venv 中可能缺少 pyyaml，请确保它已安装：
+
+      ~/.hermes/hermes-agent/venv/bin/pip install pyyaml
+
+  如果不需要 runner.py 读取 YAML 配置，也可以跳过此步。
+
+  Step 3 — 配置 Hermes config.yaml
+  ────────────────────────────────
+
+  打开 ~/.hermes/config.yaml，在 skills: 段落添加：
+
+      skills:
+        link2obsidian:
+          path: ~/.hermes/skills/link2obsidian/runner.py
+
+  如果 config.yaml 中没有 skills: 段落，则新建一个。
+
+  Step 4 — 配置环境变量
+  ─────────────────────
+
+  打开 ~/.hermes/.env（或对应 profile 的 .env 文件），添加：
+
+      # link2obsidian 配置
+      OBSIDIAN_VAULT=/path/to/your/obsidian/vault
+      LLM_API_KEY=你的LLM_API_Key
+      LLM_BASE_URL=https://api.openai.com/v1
+      LLM_MODEL=gpt-4o-mini
+
+  各环境变量的说明见第 4 节「配置详解」。
+
+  Step 5 — 重启 Hermes Gateway
+  ─────────────────────────────
+
+      hermes gateway restart
+
+  或在 tmux 中重启对应的 gateway 进程。
+
+  Step 6 — 验证技能已加载
+  ────────────────────────
+
+  在对话中发送一个链接给 agent，或说：
+
+      "帮我保存这个网页到 Obsidian"
+      "把这个链接转成笔记"
+      "link2obsidian https://example.com/article"
+
+  如果技能加载成功，agent 会调用 runner.py 进行处理。
+
+  ✓ 完成！可以在对话中使用 link2obsidian 了。
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+3. 场景 B：独立命令行工具使用
+══════════════════════════════════════════════════════════
+
+  不需要 Hermes Agent，直接作为 CLI 工具使用：
+
+  Step 1 — 克隆仓库
+
+      git clone https://github.com/thousandcents/link2obsidian.git
+      cd link2obsidian
+
+  Step 2 — 安装 Python 依赖
+
+      pip install pyyaml
+
+  Step 3 — 设置环境变量
+
+      export OBSIDIAN_VAULT=/path/to/your/obsidian/vault
+      export LLM_API_KEY=你的LLM_API_Key   # 可选，用于摘要
+
+  Step 4 — 运行
+
+      python3 runner.py https://mp.weixin.qq.com/s/xxxxxx
+
+  可选 — 添加到 PATH（方便全局调用）
+
+      chmod +x runner.py
+      ln -s "$(pwd)/runner.py" ~/.local/bin/link2obsidian
+
+  然后就可以在任意目录调用：
+
+      link2obsidian https://mp.weixin.qq.com/s/xxxxxx
+
+  ✓ 完成！
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4. 配置详解
+══════════════════════════════════════════════════════════
+
+  ┌─────────────────────────────────────────────────────────┐
+  │  OBSIDIAN_VAULT                                         │
+  │    类型: 环境变量                                        │
+  │    必填: 否（有默认值）                                  │
+  │    默认: ~/Obsidian/Thousand                             │
+  │    说明: Obsidian vault 的根目录。生成的 Markdown 文件  │
+  │          会存放在 {OBSIDIAN_VAULT}/Clippings/ 下，图片  │
+  │          存放在 {OBSIDIAN_VAULT}/Clippings/images/ 下   │
+  │                                                         │
+  │  示例: export OBSIDIAN_VAULT=/home/user/my-obsidian     │
+  └─────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────┐
+  │  LLM_API_KEY                                            │
+  │    类型: 环境变量                                        │
+  │    必填: 否（不设置则跳过摘要生成）                      │
+  │    说明: 用于生成文章要点摘要的 LLM 的 API Key。         │
+  │          支持任何 OpenAI 兼容的 API 格式。               │
+  │          不设置时，仍然正常抓取和转换文章，只是不生成    │
+  │          摘要。                                          │
+  │                                                         │
+  │  示例: export LLM_API_KEY=sk-xxxxxxxxxxxxxxxxxxxx       │
+  └─────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────┐
+  │  LLM_BASE_URL                                           │
+  │    类型: 环境变量                                        │
+  │    必填: 否                                              │
+  │    默认: https://api.openai.com/v1                       │
+  │    说明: LLM API 的 base URL。如果使用第三方兼容 API，  │
+  │          需要设置为对应的地址。                           │
+  │                                                         │
+  │  示例: export LLM_BASE_URL=https://opencode.ai/zen/go/v1 │
+  └─────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────┐
+  │  LLM_MODEL                                              │
+  │    类型: 环境变量                                        │
+  │    必填: 否                                              │
+  │    默认: gpt-4o-mini                                     │
+  │    说明: 用于摘要生成的模型名称。根据 LLM_BASE_URL      │
+  │          支持的模型来设置。                               │
+  │                                                         │
+  │  示例: export LLM_MODEL=deepseek-v4-flash               │
+  └─────────────────────────────────────────────────────────┘
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5. 验证安装
+══════════════════════════════════════════════════════════
+
+  ▸ 检查代码能否正常加载
+
+      $ python3 runner.py --help 2>&1 || true
+      $ python3 -c "import sys; sys.path.insert(0, '.'); exec(open('runner.py').read().split('if __name__')[0]); print('✅ 加载OK')"
+
+  ▸ 检查 runner.py 能找到 SKILL.md
+
+      $ ls -la SKILL.md runner.py
+      -rw-rw-r-- 1 user user 14217 SKILL.md
+      -rw-rw-r-- 1 user user 2814  runner.py
+
+  ▸ 测试真实链接（建议先测试非微信的普通网页）
+
+      $ export OBSIDIAN_VAULT=/tmp/test-vault
+      $ python3 runner.py https://example.com
+      # 观察输出，检查 /tmp/test-vault/Clippings/ 下是否生成文件
+
+  ▸ 如果是 Hermes Agent 环境，检查技能注册：
+
+      $ hermes skills list
+      ...
+      link2obsidian   将网页链接转换为 Obsidian Markdown 文件...
+      ...
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+6. 首次使用示例
+══════════════════════════════════════════════════════════
+
+  ▸ 转换微信公众号文章
+
+      export OBSIDIAN_VAULT=/path/to/obsidian/vault
+      python3 runner.py https://mp.weixin.qq.com/s/xxxxxxxx
+
+      脚本会自动：
+      - 抓取文章页面（绕过微信验证）
+      - 提取标题、描述、发布时间
+      - 下载 qpic.cn 图片到 Clippings/images/
+      - 将 HTML 转换为 Markdown
+      - 调用 LLM 生成 3~5 条核心要点
+      - 保存到 Clippings/目录
+
+  ▸ 转换知乎文章
+
+      python3 runner.py https://zhuanlan.zhihu.com/p/xxxxxx
+
+  ▸ 转换任意网页
+
+      python3 runner.py https://example.com/article
+
+  ▸ 在 Hermes Agent 中对话使用
+
+      用户: "https://mp.weixin.qq.com/s/xxxxxx 帮我存到 obsidian"
+      Agent: 自动调用 link2obsidian 技能处理
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+7. 常见问题
+══════════════════════════════════════════════════════════
+
+  Q: 微信文章提取出来是空的
+  A: 可能原因：
+     1) 微信返回了验证页面 —— 检查是否使用了正确的 User-Agent
+        （脚本默认已使用桌面 Chrome UA）
+     2) 页面是 2026 新版 Vue.js 渲染 —— 脚本目前只支持从
+        <div id="js_content"> 提取。新版公众号文章使用
+        cgiDataNew 方式，暂时需要手动处理。
+     3) 链接需要登录权限（付费文章等）
+
+  Q: 图片下载失败
+  A: 确保 curl 已安装。微信 qpic.cn 图片需要 cookie 和
+     Referer 头，脚本已自动处理。如果仍然失败，可能是
+     图片 token 已过期，脚本会自动重试一次。
+
+  Q: LLM 摘要没生成
+  A: 检查 LLM_API_KEY 环境变量是否已正确设置。
+     如果不设置此变量，脚本会自动跳过摘要生成，不影响
+     正文提取和保存。
+
+  Q: 文件保存在哪里了？
+  A: 默认在 {OBSIDIAN_VAULT}/Clippings/ 目录下。
+     如果需要更改，设置 OBSIDIAN_VAULT 环境变量指向你的
+     Obsidian vault 根目录。
+
+  Q: 提示 "pyyaml 未安装"
+  A: 运行 pip install pyyaml 安装。
+     如果 runner.py 不读取 YAML 配置，可以暂时忽略。
+
+  Q: 生成的 Markdown 中图片路径不对
+  A: 脚本生成的是相对路径 `images/文件名.jpg`，文件保存在
+     `Clippings/images/` 下。如果 Obsidian 路径结构不同，
+     需手动调整 IMAGES_DIR 和图片引用格式。
+
+  Q: Hermes Agent 中技能调用失败
+  A: 检查：
+     1) config.yaml 中 path 指向 runner.py 的正确路径
+     2) 环境变量在 .env 文件中已设置（或 profile 的 .env）
+     3) 重启 gateway: hermes gateway restart
+     4) 用 hermes skills list 确认技能已注册
+
+  Q: 如何自定义摘要的 prompt？
+  A: 编辑 SKILL.md 中 generate_summary 函数的 prompt 文本。
+     修改后重启 gateway 即可生效（runner.py 动态加载 SKILL.md）。
+
+  Q: 非微信网页也能用吗？
+  A: 可以。脚本会检测 URL 来源：
+     - mp.weixin.qq.com → 微信公众号
+     - zhuanlan.zhihu.com → 知乎
+     - 其他 → 网页收藏
+     但是注意，非微信页面可能没有 <div id="js_content">，
+     需要根据页面结构调整提取逻辑。
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  官方仓库: https://github.com/thousandcents/link2obsidian
+  问题反馈: 请在 GitHub 仓库提交 Issue
