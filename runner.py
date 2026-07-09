@@ -28,7 +28,9 @@ def detect_profile():
 
 
 def load_llm_config(profile="ob_xianzi"):
-    """从指定 profile 的 Hermes 配置中读取 LLM 提供商信息"""
+    """从指定 profile 的 Hermes 配置中读取 LLM 提供商信息。
+    支持 config.yaml 中的 ${VAR} 引用，自动从 .env 展开。
+    """
     profile_dir = os.path.expanduser(f"~/.hermes/profiles/{profile}")
     config_path = os.path.join(profile_dir, "config.yaml")
     env_path = os.path.join(profile_dir, ".env")
@@ -39,22 +41,8 @@ def load_llm_config(profile="ob_xianzi"):
         "api_key": "",
     }
 
-    # 从 config.yaml 读取（model 嵌套结构）
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            cfg = yaml.safe_load(f)
-        model_cfg = cfg.get('model', {}) if cfg else {}
-        provider = str(model_cfg.get('provider', ''))
-        if provider and ':' in provider:
-            parts = provider.split(':', 1)
-            if len(parts) == 2:
-                llm_config['model'] = parts[1].strip()
-        if model_cfg.get('base_url'):
-            llm_config['base_url'] = model_cfg['base_url'].rstrip('/')
-    except Exception:
-        pass
-
-    # 从 .env 读取 API key（优先 OPENCODE_GO_API_KEY，其次 OPENAI_API_KEY）
+    # 1. 先读取 .env 到字典（供 ${VAR} 展开 + API key 查找）
+    env_vars = {}
     try:
         with open(env_path, 'r', encoding='utf-8') as f:
             for line in f:
@@ -65,17 +53,54 @@ def load_llm_config(profile="ob_xianzi"):
                     k, v = line.split('=', 1)
                     key_name = k.strip()
                     val = v.strip().strip('"').strip("'")
-                    if key_name == 'OPENCODE_GO_API_KEY' and val != '***':
-                        llm_config['api_key'] = val
-                    elif key_name == 'OPENAI_API_KEY' and not llm_config['api_key']:
-                        if val and '...' not in val[:10] and val != '***':
-                            llm_config['api_key'] = val
-                    elif key_name == 'OPENAI_BASE_URL':
-                        llm_config['base_url'] = val.rstrip('/')
+                    if val and val != '***':
+                        env_vars[key_name] = val
     except Exception:
         pass
 
-    # 如果用 xunfei/astron 端点，使用正确的模型名
+    def expand_var(value):
+        """展开 ${VAR} 引用，优先 .env 字典，其次 os.environ，未找到则保留原样"""
+        if not isinstance(value, str):
+            return value
+        def replacer(match):
+            var_name = match.group(1)
+            return env_vars.get(var_name, os.environ.get(var_name, match.group(0)))
+        return re.sub(r'\$\{(\w+)\}', replacer, value)
+
+    # 2. 从 config.yaml 读取（展开 ${VAR} 引用）
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            cfg = yaml.safe_load(f)
+        model_cfg = cfg.get('model', {}) if cfg else {}
+        provider = str(model_cfg.get('provider', ''))
+        if provider and ':' in provider:
+            parts = provider.split(':', 1)
+            if len(parts) == 2:
+                llm_config['model'] = parts[1].strip()
+        if model_cfg.get('base_url'):
+            expanded = expand_var(model_cfg['base_url'])
+            if not expanded.startswith('${'):  # 展开成功
+                llm_config['base_url'] = expanded.rstrip('/')
+        if model_cfg.get('api_key'):
+            expanded = expand_var(model_cfg['api_key'])
+            if expanded and not expanded.startswith('${'):
+                llm_config['api_key'] = expanded
+    except Exception:
+        pass
+
+    # 3. 从 .env 读取 API key（如果 config.yaml 未提供或展开失败）
+    #    优先级: SENSE_API_KEY > OPENCODE_GO_API_KEY > OPENAI_API_KEY
+    if not llm_config['api_key']:
+        for key_name in ['SENSE_API_KEY', 'OPENCODE_GO_API_KEY', 'OPENAI_API_KEY']:
+            if key_name in env_vars:
+                llm_config['api_key'] = env_vars[key_name]
+                break
+
+    # 4. OPENAI_BASE_URL 覆盖（如果 .env 中有且未被注释）
+    if 'OPENAI_BASE_URL' in env_vars:
+        llm_config['base_url'] = env_vars['OPENAI_BASE_URL'].rstrip('/')
+
+    # 5. 如果用 xunfei/astron 端点，使用正确的模型名
     if 'xf-yun' in llm_config['base_url'] or 'maas-coding' in llm_config['base_url']:
         llm_config['model'] = 'astron-code-latest'
 
@@ -121,6 +146,7 @@ def run_link2obsidian(url, profile="ob_xianzi", workdir=None):
         code_obj = compile(python_code.strip(), '<string>', 'exec')
         exec_globals = {
             'subprocess': subprocess,
+            'shutil': __import__('shutil'),
             're': re,
             'os': os,
             'hashlib': hashlib,
@@ -129,6 +155,7 @@ def run_link2obsidian(url, profile="ob_xianzi", workdir=None):
             'html_mod': html_mod,
             'tempfile': tempfile,
             'Path': Path,
+            'sys': sys,
             '_LLM_CONFIG': llm_config,
             '__name__': '__main__'
         }

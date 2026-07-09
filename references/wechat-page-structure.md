@@ -46,8 +46,12 @@ Python 等效实现——注意 `\n` 必须替换为实际换行符（ASCII 10�
 
 ```python
 def jsdecode(val):
+    """模拟微信 JsDecode 函数解码转义序列"""
     if not val:
         return val
+    # Step 1: JS 字符串字面量转义 \\ → \
+    val = val.replace('\\\\', '\\')
+    # Step 2: JsDecode 转义
     val = val.replace('\\x5c', '\\')
     val = val.replace('\\x0d', '\r')
     val = val.replace('\\x22', '"')

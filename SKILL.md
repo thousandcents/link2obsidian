@@ -71,8 +71,11 @@ def _call_llm(prompt_text):
 
     payload = json.dumps({
         "model": model,
-        "messages": [{"role": "user", "content": prompt_text}],
-        "max_tokens": 600,
+        "messages": [
+            {"role": "system", "content": "直接输出结果，不要推理过程。"},
+            {"role": "user", "content": prompt_text}
+        ],
+        "max_tokens": 3000,
         "temperature": 0.3,
     }).encode("utf-8")
 
@@ -89,7 +92,10 @@ def _call_llm(prompt_text):
     try:
         resp = urllib.request.urlopen(req, timeout=60)
         result = json.loads(resp.read())
-        return result["choices"][0]["message"]["content"].strip()
+        msg = result["choices"][0]["message"]
+        # 兼容推理模型（SenseNova 用 reasoning + content）和标准模型（仅 content）
+        text = msg.get("content") or msg.get("reasoning") or ""
+        return text.strip()
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors='replace')
         if "QpsOverFlow" in body or "QPS" in body:
@@ -186,9 +192,57 @@ for attr in ["data-src", "src"]:
 
 # ─── 5. 下载图片 ───────────────────────────────────────────
 
+def is_valid_image(filepath):
+    """检查文件是否为有效图片（通过 magic bytes）"""
+    if not os.path.exists(filepath) or os.path.getsize(filepath) < 100:
+        return False
+    with open(filepath, 'rb') as f:
+        header = f.read(8)
+    return (
+        header[:3] == b'\xff\xd8\xff' or  # JPEG
+        header[:4] == b'\x89PNG' or        # PNG
+        header[:4] == b'RIFF' or           # WEBP
+        header[:4] == b'GIF8'              # GIF
+    )
+
+def download_with_playwright(failed_list):
+    """使用 Playwright 浏览器下载 curl 失败的图片（绕过防盗链）"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("  ⚠️ Playwright 未安装，无法使用浏览器备选方案")
+        return {}
+
+    results = {}
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_extra_http_headers({"Referer": "https://mp.weixin.qq.com/"})
+        page.set_default_timeout(15000)
+
+        for img_url, outpath in failed_list:
+            try:
+                resp = page.goto(img_url, wait_until='load', timeout=15000)
+                if resp and resp.status == 200:
+                    body = resp.body()
+                    with open(str(outpath), 'wb') as f:
+                        f.write(body)
+                    ok = is_valid_image(str(outpath))
+                    results[img_url] = ok
+                    print(f"  🌐 {'✅' if ok else '❌'} {os.path.basename(str(outpath))} (Playwright, {len(body)} bytes)")
+                else:
+                    results[img_url] = False
+                    print(f"  🌐 ❌ {os.path.basename(str(outpath))} (Playwright, HTTP {resp.status if resp else 'N/A'})")
+            except Exception as e:
+                results[img_url] = False
+                print(f"  🌐 ❌ {os.path.basename(str(outpath))} (Playwright 异常: {e})")
+
+        browser.close()
+    return results
+
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 img_filenames = {}  # url -> 本地文件名
-download_failed = False
+failed_downloads = []  # [(url, outpath)] — 供 Playwright 备选
 
 for img_url in img_urls:
     ext = "jpg" if "jpg" in img_url or "jpeg" in img_url else "png"
@@ -196,8 +250,8 @@ for img_url in img_urls:
     fname = f"{url_hash}.{ext}"
     outpath = IMAGES_DIR / fname
 
-    # 如果文件已存在（同一张图片被多篇文章引用），跳过下载
-    if os.path.exists(outpath) and os.path.getsize(outpath) > 0:
+    # 如果文件已存在且为有效图片，跳过下载
+    if is_valid_image(str(outpath)):
         print(f"  ⏭️ {fname} (已存在，跳过)")
         img_filenames[img_url] = fname
         continue
@@ -210,16 +264,16 @@ for img_url in img_urls:
         img_url
     ], capture_output=True, timeout=30)
 
-    ok = os.path.exists(outpath) and os.path.getsize(outpath) > 0
+    ok = is_valid_image(str(outpath))
     if ok:
         print(f"  ✅ {fname}")
     else:
-        print(f"  ❌ {fname} (0 bytes, URL 可能过期)")
-        download_failed = True
+        print(f"  ❌ {fname} (curl 失败，稍后用 Playwright 重试)")
+        failed_downloads.append((img_url, outpath))
     img_filenames[img_url] = fname
 
 # ⚠️ Token 过期重试：重新抓取页面获取新鲜 URL
-if download_failed:
+if failed_downloads:
     print(f"  🔄 重新抓取页面获取新鲜图片 URL...")
     r2 = subprocess.run([
         "curl", "-sL", "-A", UA,
@@ -241,39 +295,64 @@ if download_failed:
                     seen2.add(u2)
                     fresh_urls.append(u2)
 
-        for i in range(min(len(fresh_urls), len(img_urls))):
+        # 用新鲜 URL 重试 curl
+        still_failed = []
+        for i in range(min(len(fresh_urls), len(failed_downloads))):
             fresh_url = fresh_urls[i]
+            old_url, outpath = failed_downloads[i]
             ext = "jpg" if "jpg" in fresh_url or "jpeg" in fresh_url else "png"
             url_hash = hashlib.md5(fresh_url.encode()).hexdigest()
             fname = f"{url_hash}.{ext}"
-            outpath = IMAGES_DIR / fname
-            # 更新映射：用新的 MD5 文件名替换旧的
-            img_filenames[img_urls[i]] = fname
+            new_outpath = IMAGES_DIR / fname
+            img_filenames[old_url] = fname
             r3 = subprocess.run([
-                "curl", "-sL", "-o", str(outpath),
+                "curl", "-sL", "-o", str(new_outpath),
                 "-b", cookie_file,
                 "-H", "Referer: https://mp.weixin.qq.com/",
                 "-A", UA,
                 fresh_url
             ], capture_output=True, timeout=30)
-            ok2 = os.path.exists(outpath) and os.path.getsize(outpath) > 0
-            print(f"  {'✅' if ok2 else '❌'} {fname} (重试{'成功' if ok2 else '失败'})")
+            ok2 = is_valid_image(str(new_outpath))
+            if ok2:
+                print(f"  ✅ {fname} (curl 重试成功)")
+            else:
+                print(f"  ❌ {fname} (curl 重试仍失败)")
+                still_failed.append((fresh_url, new_outpath))
+
+        # curl 重试仍失败的图片，用 Playwright 浏览器下载
+        if still_failed:
+            print(f"  🌐 启动 Playwright 浏览器备选方案 ({len(still_failed)} 张图片)...")
+            pw_results = download_with_playwright(still_failed)
+            # 更新文件名映射
+            for fresh_url, outpath in still_failed:
+                if pw_results.get(fresh_url):
+                    print(f"  🌐 ✅ {os.path.basename(str(outpath))} 浏览器下载成功")
+                else:
+                    print(f"  🌐 ❌ {os.path.basename(str(outpath))} 浏览器下载也失败")
+    else:
+        # 无法重新抓取页面，直接对原始 URL 用 Playwright
+        print(f"  🌐 启动 Playwright 浏览器备选方案 ({len(failed_downloads)} 张图片)...")
+        pw_results = download_with_playwright(failed_downloads)
 
 # ─── 6. HTML → Markdown ───────────────────────────────────
 
 content = raw_html
 
-# 替换图片标签
-for attr in ["data-src", "src"]:
-    for orig_url, local_name in img_filenames.items():
-        for sa in ["data-src", "src"]:
-            content = re.sub(
-                rf'<img[^>]*{re.escape(sa)}="{re.escape(orig_url)}"[^>]*>',
-                f"\n![{local_name}](images/{local_name})\n",
-                content
-            )
+# 替换图片标签（就地按 <img> 标签替换，保证位置与原文一致，并兼容 &amp; 转义）
+def _replace_img_tag(m):
+    tag = m.group(0)
+    url = None
+    for sa in ("data-src", "src"):
+        um = re.search(rf'{sa}="([^"]*)"', tag)
+        if um:
+            url = um.group(1).replace("&amp;", "&")
+            break
+    if url and url in img_filenames:
+        name = img_filenames[url]
+        return f"\n![{name}](images/{name})\n"
+    return ""  # 未下载或提取不到的图片，直接移除
 
-content = re.sub(r"<img[^>]*>", "", content)
+content = re.sub(r"<img[^>]*>", _replace_img_tag, content)
 content = re.sub(r"<script[^>]*>.*?</script>", "", content, flags=re.DOTALL)
 content = re.sub(r"<style[^>]*>.*?</style>", "", content, flags=re.DOTALL)
 
@@ -400,3 +479,7 @@ print(f"\n✅ 已保存: {output_path}")
 
    （正文开始...）
    ```
+7. **图片验证 + Playwright 备选** — 下载的图片通过 magic bytes 验证（JPEG/PNG/WEBP/GIF），不仅检查文件大小。如果 curl 下载失败或文件非有效图片，自动触发三层重试：
+   - **第一层**：curl + cookie + Referer（原有方式）
+   - **第二层**：重新抓取页面获取新鲜 URL，再用 curl 重试
+   - **第三层**：启动 Playwright headless 浏览器直接下载（绕过防盗链，需要 `pip install playwright && playwright install chromium`）
