@@ -2,6 +2,15 @@
 """
 link2obsidian 执行器（共享版本）
 从 SKILL.md 动态加载代码并执行，支持多 profile。
+
+执行流程：
+  1. 从同目录 SKILL.md 提取 Python 代码块（抓取 + 转 Markdown 逻辑）并执行，
+     生成 Clippings/ 下的 .md 文件
+  2. 自动调用 postprocess.py 完成后处理（正则/固定规则的格式清理），
+     无需 Agent 手动触发 —— 解决「postprocess 偶尔没运行」的问题
+
+postprocess.py 的位置会自动查找（同目录 / ../note-taking/link2obsidian/ /
+~/.hermes 下搜索），找不到时仅告警并跳过，不影响已生成的 .md 文件。
 """
 import sys
 import re
@@ -14,6 +23,7 @@ import json
 import tempfile
 import yaml
 import argparse
+import importlib.util
 from pathlib import Path
 
 
@@ -108,19 +118,21 @@ def load_llm_config(profile="ob_xianzi"):
 
 
 def run_link2obsidian(url, profile="ob_xianzi", workdir=None):
-    """从 SKILL.md 动态加载代码并执行"""
+    """从 SKILL.md 动态加载代码并执行，返回生成的 .md 文件路径（Path）或 None"""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     skill_path = os.path.join(script_dir, "SKILL.md")
     with open(skill_path, 'r', encoding='utf-8') as f:
         content = f.read()
 
-    # 支持 ```python 和 ~~~python 两种代码栅格
-    code_match = re.search(r'```python\n(.*?)```', content, re.DOTALL)
+    # 支持 ~~~python 和 ```python 两种代码栅格。
+    # 优先 ~~~python：本技能的抓取代码块用 ~~~python 包裹（代码内部含 ``` 反引号，
+    # 不能用 ```python 否则会提前闭合）；文档里的 ```python 示例不干扰。
+    code_match = re.search(r'~~~python\n(.*?)~~~', content, re.DOTALL)
     if not code_match:
-        code_match = re.search(r'~~~python\n(.*?)~~~', content, re.DOTALL)
+        code_match = re.search(r'```python\n(.*?)```', content, re.DOTALL)
     if not code_match:
         print("错误: 未找到 Python 代码块")
-        return False
+        return None
 
     python_code = code_match.group(1)
 
@@ -160,9 +172,66 @@ def run_link2obsidian(url, profile="ob_xianzi", workdir=None):
             '__name__': '__main__'
         }
         exec(code_obj, exec_globals)
-        return True
+        # 抓取代码会在执行结束时设置 output_path（Clippings/xxx.md）
+        output_path = exec_globals.get("output_path")
+        return output_path
     except Exception as e:
         print(f"执行错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def locate_postprocess():
+    """定位 postprocess.py。
+
+    按以下顺序查找（覆盖 runner 经软链指向 source、以及 ob_xianzi 本地 fork 两种真实位置）：
+      1. 与 runner.py 同目录
+      2. ../note-taking/link2obsidian/postprocess.py
+      3. ~/.hermes/profiles/ob_xianzi/skills/note-taking/link2obsidian/postprocess.py
+      4. ~/.hermes/skills/note-taking/link2obsidian/postprocess.py
+      5. ~/.hermes 下任意 link2obsidian 目录内的 postprocess.py（兜底搜索）
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    home = os.path.expanduser("~")
+    candidates = [
+        os.path.join(script_dir, "postprocess.py"),
+        os.path.join(script_dir, "..", "note-taking", "link2obsidian", "postprocess.py"),
+        os.path.join(home, "profiles", "ob_xianzi", "skills", "note-taking", "link2obsidian", "postprocess.py"),
+        os.path.join(home, "skills", "note-taking", "link2obsidian", "postprocess.py"),
+    ]
+    for c in candidates:
+        p = os.path.abspath(c)
+        if os.path.isfile(p):
+            return p
+    # 兜底：在 ~/.hermes 下搜索任意 link2obsidian 目录内的 postprocess.py
+    import glob
+    for p in glob.glob(os.path.join(home, ".hermes", "**", "link2obsidian", "postprocess.py"), recursive=True):
+        return os.path.abspath(p)
+    return None
+
+
+def run_postprocess(md_path, url):
+    """自动调用 postprocess.py 对生成的 .md 文件做确定性格式清理。
+
+    失败仅告警，不影响已生成的文件；返回 True 表示后处理成功执行。
+    """
+    pp = locate_postprocess()
+    if not pp:
+        print("⚠️ 未找到 postprocess.py，跳过自动后处理（请手动运行 postprocess.py）")
+        return False
+    try:
+        print(f"\n🔧 自动运行后处理: {pp}")
+        spec = importlib.util.spec_from_file_location("link2obsidian_postprocess", pp)
+        if spec is None or spec.loader is None:
+            print("⚠️ 无法加载 postprocess.py（spec 为空），跳过自动后处理")
+            return False
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        rc = mod.process(Path(md_path), url, dry_run=False, verbose=True)
+        return rc == 0
+    except Exception as e:
+        print(f"⚠️ 后处理运行失败: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -188,5 +257,11 @@ if __name__ == "__main__":
     profile = args.profile or detect_profile()
     print(f"🔧 使用 profile: {profile}")
 
-    success = run_link2obsidian(args.url, profile=profile, workdir=args.workdir)
-    sys.exit(0 if success else 1)
+    output_path = run_link2obsidian(args.url, profile=profile, workdir=args.workdir)
+    if not output_path:
+        sys.exit(1)
+
+    # 自动后处理（确定性格式清理），无需 Agent 手动触发
+    run_postprocess(output_path, args.url)
+
+    sys.exit(0)
