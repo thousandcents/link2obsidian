@@ -1,78 +1,82 @@
-# WeChat Article Page Structure Reference (2026)
+# 微信公众号页面结构参考（2026年）
 
-## Background
+## 背景
 
-As of May 2026, WeChat public account articles have upgraded to a Vue.js dynamically-rendered page structure. The legacy HTML extraction method (`div#js_content`) no longer works for new pages.
+2026年5月发现微信公众号页面结构已升级，使用 Vue.js 动态渲染。旧版 HTML 提取方式（`div#js_content`）对新版页面失效。
 
-## Two Page Structures
+## 两种页面结构对比
 
-### Legacy (Traditional HTML)
+### 旧版（传统 HTML）
 
-- Title in `var msg_title = '...'` or `og:title`
-- Content in `<div id="js_content" style="visibility: hidden;">...</div>`
-- Images use `<img data-src="...">` tags
-- Extracted via readability-lxml or regex
+- 标题在 `var msg_title = '...'` 或 `og:title` 中
+- 正文在 `<div id="js_content" style="visibility: hidden;">...</div>` 中
+- 图片使用 `<img data-src="...">` 标签
+- 可通过 readability-lxml 等库提取
 
-### New (Vue.js Dynamic Rendering)
+### 新版（Vue.js 动态渲染）
 
-- Page is ~1.9MB, mostly JavaScript
-- Article data stored in `cgiDataNew` object inside `<script>` tags
-- Title: `title: JsDecode('...')`
-- Content: `content_noencode: JsDecode('...')` (plain text, not HTML)
-- Author: `nick_name: JsDecode('...')`
-- Time: `create_time: JsDecode('...')`
-- Cover image: `cdn_url_1_1: JsDecode('...')` or `cdn_url: JsDecode('...')`
-- Requires simulating WeChat's JsDecode function to decode escape sequences
+- 页面约 1.9MB，大部分为 JavaScript 代码
+- 文章数据存储在 `<script>` 标签的 `cgiDataNew` 对象中
+- 标题：`title: JsDecode('...')`
+- 正文：`content_noencode: JsDecode('...')`（纯文本，非 HTML）
+- 作者：`nick_name: JsDecode('...')`
+- 时间：`create_time: JsDecode('...')`
+- 封面图：`cdn_url_1_1: JsDecode('...')` 或 `cdn_url: JsDecode('...')`
+- 需要模拟微信 JsDecode 函数解码转义序列
 
-## JsDecode Function
+## JsDecode 函数
 
-WeChat frontend uses `JsDecode` to decode escaped characters:
+微信前端使用 `JsDecode` 函数解码转义字符：
 
 ```javascript
 function JsDecode(str) {
     return str
-        .replace(/\\x5c/g, '\\')    // backslash
-        .replace(/\\x0d/g, '\r')   // carriage return
-        .replace(/\\x22/g, '"')    // double quote
-        .replace(/\\x26/g, '&')    // ampersand
-        .replace(/\\x27/g, "'")    // single quote
-        .replace(/\\x3c/g, '<')    // less than
-        .replace(/\\x3e/g, '>')    // greater than
-        .replace(/\\x0a/g, '\n');  // newline
+        .replace(/\\x5c/g, '\\')    // 反斜杠
+        .replace(/\\x0d/g, '\r')   // 回车
+        .replace(/\\x22/g, '"')    // 双引号
+        .replace(/\\x26/g, '&')    // & 符号
+        .replace(/\\x27/g, "'")    // 单引号
+        .replace(/\\x3c/g, '<')    // 小于号
+        .replace(/\\x3e/g, '>')    // 大于号
+        .replace(/\\x0a/g, '\n');  // 换行
 }
 ```
 
-Python equivalent:
+Python 等效实现——注意 `\n` 必须替换为实际换行符（ASCII 10）而非字面 `\n`：
 
 ```python
 def jsdecode(val):
+    """模拟微信 JsDecode 函数解码转义序列"""
     if not val:
         return val
-    val = val.replace('\\x5c', '\\\\')
+    # Step 1: JS 字符串字面量转义 \\ → \
+    val = val.replace('\\\\', '\\')
+    # Step 2: JsDecode 转义
+    val = val.replace('\\x5c', '\\')
     val = val.replace('\\x0d', '\r')
     val = val.replace('\\x22', '"')
     val = val.replace('\\x26', '&')
     val = val.replace("\\x27", "'")
     val = val.replace('\\x3c', '<')
     val = val.replace('\\x3e', '>')
-    val = val.replace('\\x0a', '\n')
+    val = val.replace('\\x0a', '\n')  # 注意：'\n' 是实际换行，不是字面 '\n'
     return val
 ```
 
-## Detection
+## 诊断方法
 
-Check which page type:
+检查页面是旧版还是新版：
 
 ```bash
-# Check for legacy HTML content area
+# 检查是否有传统 HTML 内容区
 grep -c 'id="js_content"' page.html
 
-# Check for new script data area
+# 检查是否有新版脚本数据区
 grep -c 'content_noencode' page.html
 ```
 
-## Known Limitations
+## 已知局限
 
-- New version content is plain text, no rich formatting or images
-- If content includes images, they need to be fetched from `cdn_url` or `sub_articles` fields
-- Multi-article messages need to check `sub_articles` array
+- 新版正文是纯文本，不含图片链接和富文本格式
+- 如果正文包含图片，需额外从 `cdn_url` 或 `sub_articles` 字段获取
+- 多图文消息需检查 `sub_articles` 数组
