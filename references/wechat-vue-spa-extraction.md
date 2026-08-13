@@ -19,6 +19,38 @@ curl -s -L \
 
 检查 HTML 中是否存在 Vue.js SPA 特征：`grep -c 'content_noencode' page.html`（>0 即为 SPA）。
 
+## ⚠️ SPA 页面 runner.py 也可能抓全：先做指纹比对，再决定是否重抓
+
+**实战 2026-08-08（GenOffice 文章）**：页面含 `content_noencode`（SPA 签名），但 runner.py 的 `js_content` 正则**照样完整抓到了正文**（文件 1.8KB、正文齐全）。原因：部分 SPA 页面同时保留了 `js_content` div，runner 不需要 JsDecode 就能成功。
+
+**因此：发现 SPA 签名 ≠ 必须走 JsDecode 重抓。** 当 runner 输出 >500 字节但偏小、疑似截断时，先解码 `content_noencode` 做**纯文本指纹比对**，确认覆盖度后再决定：
+
+```python
+import re, html as html_mod
+# 1) JsDecode 解码 content_noencode（见下文 Step 2）得到 decoded HTML
+text = re.sub(r'<[^>]+>', '', decoded)
+text = html_mod.unescape(text).replace('&nbsp;', ' ')
+text = re.sub(r'\s+', '', text)                    # 去全部空白 → 原文指纹
+
+# 2) md 正文同样处理（去掉 frontmatter、LLM 摘要块、图片引用、格式符号）
+body = md_content.split('---\n\n', 2)[-1]
+body = re.sub(r'> 📌 \*\*文章要点\*\*\n(?:> - .*\n)+', '', body)
+md_text = re.sub(r'!\[[^\]]*\]\([^)]*\)', '', body)
+md_text = re.sub(r'[#*`|\->\s]', '', md_text)
+
+# 3) 滑窗找原文中有而 md 中没有的片段
+W = 30
+missing = [text[i:i+W] for i in range(0, len(text)-W, 15) if text[i:i+W] not in md_text]
+print(len(text), len(md_text), len(missing))
+for s in missing[:10]: print("  缺失:", s)
+```
+
+**判定**：
+- 长度差 ~1-2% 且缺失片段均可解释为格式噪声（URL 前后缀、表格单元格边界、全/半角标点、标题与正文的拼接顺序差异）→ **内容完整**，保留 runner 输出，只做语义修复（标题粘连、fence 等），**不要重抓**
+- 大段连续缺失 → 真截断，走下方 JsDecode 提取流程
+
+> 该比对同时适用于任何「怀疑正文不完整」的场景，不限于 SPA 页面。
+
 ## 代理绕过（重要）
 
 Hermes 默认走 `https_proxy`（Clash 127.0.0.1:7897）连接外网。部分环境（尤其是 Clash 代理）连接 mp.weixin.qq.com 时会遇到 `SSL_ERROR_SYSCALL` 或 `net::ERR_CONNECTION_CLOSED`。

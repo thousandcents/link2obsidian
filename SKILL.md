@@ -546,6 +546,11 @@ runner.py 执行完毕后，Agent 按以下顺序处理：
 > - **可靠重开方式**：用 `glob.glob('*拍脑袋*')` 或 `search_files(target='files')` 按稳定子串定位；execute_code 里用 `os.path.join(WORKDIR,'Clippings', f)` 且 `f` 取自 `glob` 结果。
 > - execute_code 的工作目录是 Hermes 会话目录（非 vault），务必用**绝对路径** `WORKDIR`（即本技能 `runner.py` 的 `WORKDIR` 常量，默认 `/home/jack-lin-sparrow/Obsidian/Thousand`）。
 
+> ⚠️ **中文弯引号文件名陷阱**：`safe_title` 剥离 ASCII 引号但不剥离**中文弯引号**（U+201C `"` U+201D `"`），后者会保留在磁盘文件名中，触发三个连锁问题：
+> - **Shell `mv` 静默失败**：bash 将中文弯引号当作元字符，`mv "从"因子动物园"到..."` → `mv: 没有那个文件或目录`。**绕过**：用 Python `shutil.move()` 或 `os.rename()` 替代 shell mv。
+> - **Python `execute_code` SyntaxError**：直接赋值 `f = "从"因子动物园"...md"` 时，中文引号终结字符串字面量，报 `SyntaxError: invalid syntax`。**绕过**：用 `glob.glob('/path/从*因子*')` 定位文件，或 Unicode 转义 `f = "从\\u201c因子动物园\\u201d...md"`。
+> - **glob 碰撞错配**：相似前缀的文章命中多个 glob 结果（如 `从*因子*` 同时匹配「因子动物园」和「Agent 挖因子」），先取先返回的文件会算错 sha256 或错插溯源标记。**绕过**：glob 后用 frontmatter `title:` 字段核验目标，确认 `sha256` 的 `nSTXlHon` 等 URL 片段。
+
 ### 第 0 步：自动后处理（确定性清理）— 已由 runner.py 自动完成
 
 `runner.py` 在抓取并生成 `.md` 文件后，**已自动调用 `postprocess.py` 完成所有可由正则/固定规则判定的清理工作**，无需 Agent 手动触发（这正是之前「postprocess 偶尔没运行」的根因：它原本是 Agent 的手动步骤，会被漏掉）。
@@ -585,7 +590,8 @@ python3 ~/.hermes/profiles/ob_xianzi/skills/note-taking/link2obsidian/postproces
    - 列表项 `- TEXT**：/（/—— 会把/则` 系列 → `- **TEXT**...`
    - 冒号后加粗偏移 `- 原始回测：** 4 年...` → `- **原始回测：** 4 年...`
    - 整段加粗丢失（段末 `**` 开头无 `**`）→ 段首补 `**`
-   - 兜底：连续 4+ 星号 → `**`（覆盖 overlapping fix 产生的 `****`）
+   - **兜底：连续 4+ 星号 → `**`（覆盖 overlapping fix 产生的 `****`）**
+      - **AI 终扫（postprocess 后必做）**：对剩余仍未配对的孤儿 `**`，**直接删除**（勿猜原文加粗范围，避免引入错误强调），用精确字符串替换逐个删、保留已成对部分。脚本见 `references/batch-image-screening-and-orphan-sweep.md`。
    - **进阶清理（link2obsidian 实战沉淀，开发纪律见 `references/postprocess-extension-pitfalls.md`）**：
      - 标题孤立 `**` 包裹移除：`**### 2.1 标题粘连**` → `### 2.1 标题粘连`（仅去首尾 `**`，标题/正文粘连的语义拆分仍留给 AI）
      - 独立成行 `**` 删除（转换器残留的孤立加粗行）
@@ -658,9 +664,19 @@ postprocess.py 已在报告里提示"文件仅 N 字节（< 500）"，此时 Age
 **彻底失败**
 - 若以上方法都无效，才判断为真正不可抓取的页面，删除文件并告知用户
 
-### 第 2 步：空 description 补全（仅当 postprocess 报告提示）
+### 第 2 步：description 校验与补全
 
-postprocess.py 检测到 frontmatter 中 `description:` 为空时会输出 `⚠️ 需 AI`。Agent 此时根据文章标题和首段内容生成 30~60 字的描述，写入 frontmatter `description:` 字段。
+postprocess.py 检测到 frontmatter 中 `description:` 为空时会输出 `⚠️ 需 AI`。
+
+**注意三个不同故障模式**：
+1. **空 description**（`description: `）—— 微信文章 OG meta 不含摘要，由 AI 根据标题和首段补 30~60 字描述。
+2. **错 description**（`description:` 有值但与文章无关）—— 微信文章 OG meta description 有时来自发布者的公众号简介/签名语，与正文毫无关系（如某期货文章被填成佛教语录）。**此时同样需 Agent 手动重写**，不要用抓到的描述直接入库。
+3. **截断 description**（有值且主题相关，但句子在半途被切断）—— 微信 OG meta 描述长度有限会被截断（实战 2026-08-08：`…包含文字处理、表格、演` 在「演示文稿」的「演」字处戛然而止）。**判定**：主题一致但结尾无终止标点、停在词/短语中间。**处理**：同样手动重写完整 30~60 字描述，不要留截断文本入库。
+
+**判断标准**：读 description 是否和文章标题/首段主题一致。不一致即视为「错」，按以下格式重写：
+```markdown
+description: <30~60 字，概括文章核心论点>
+```
 
 ### 第 3 步：复杂 Markdown 修复（postprocess 无法判定的语义型问题）
 
@@ -675,8 +691,17 @@ postprocess.py 已处理固定模式；以下场景需要 Agent 按上下文语�
 - **标题层级修复**：NBSP 占位的空 `#  ` 标题在 NBSP 清除后变成纯空格标题，需结合上下文判断正确层级（如应降为 `##` 而非 `#`）
 - **编号内容标签升级**：`**技术版**` `**小白版**` 等步骤类标签跟在"下面正式开始"等转场句后 → 格式化为 `### 技术版`（保持层次，不用 `##`）
 - **数学符号占位符残留**：部分 WeChat 量化/数学文章用 NBSP 代替希腊字母（β、λ、θ 等），NBSP 清除后正文中残留孤立空格（如 `把信号 拉长`）。**不要试图用空格位置推测原始符号**（容易猜错引入误导），在回复中告知用户"本文含数学公式符号，HTML→Markdown 转换中希腊字母等符号已丢失，建议对照原文"
+- **公式整体被抹除的签名家族**（实战 2026-08-07，横截面 R² 文章）：公式若以 MathML/SVG/公式图片渲染，会被 `<[^>]+>` 通用抹平整段删掉，不只丢希腊字母，**数值也一起丢**。特征签名：
+  - 句中空白 + 孤儿标点：`二者相乘得到 ，市场几乎完全解释`、`TSR = 0.48, RSR = 1.93, ；`（值丢失留下 `, ；`）
+  - **图注尾部孤儿 `*`**：`获得最大 。*`、`跨越更高的  等值线。*`——图注原为斜体 `*图：…R²。*`，公式被删后开头 `*` 也随之丢失，只剩结尾孤儿 `*`。修复：直接删尾部 `*`（`。*` → `。`），不要试图补回斜体
+  - **参考文献期刊斜体残骸**：`Working Paper*.`、`Journal of Financial Economics*, 96(2)`——期刊名原为 `*Journal*` 斜体，开头 `*` 丢失。修复：按引用格式补全为 `*Working Paper*.`、`*Journal of Financial Economics*, 96(2)`（期刊名/文献类型包进 `*...*`，这是安全修复，非臆测）
+  - **纪律**：丢失的数值与符号一律不臆测补回，在回复中明确告知用户哪些位置丢公式；但「删孤儿 `*`」「补期刊斜体」属确定性清理，可以做
 - **box-drawing 流程图（┌──┬──┐ 字符画）不是 GFM 表格**：部分微信文章把流程图/架构图渲染成 box-drawing 字符（`┌─┬─┐`/`│阶段│说明│`/`└─┴─┘`），既不是 HTML `<table>`（scraper 不转），也不含 `%`（postprocess 的「压平表格检测」也漏掉）。这种字符画在 Obsidian 里显示为乱码宽字符块，**必须手动按语义转为 pipe 表**（`| 阶段 | 说明 |` + `|---|---|` + 数据行，前后留空行）。可复用的转换函数与判定规则见 `references/wechat-boxdrawing-flowchart.md`。**通用 Markdown 表格修复（含 box-drawing / 空格对齐数据表 / 缩进 pipe 表三类 + 列 0 缩进修复 + 字符串替换实操要点）见 `references/markdown-table-repair.md`**。
-- **Postprocess 报告"0 项需 AI"≠文件已可发布**：标题+正文粘连、跨段孤儿 `**`（段首有 `**` 但无段末闭合）、引流图片所在营销小节的连带删除等语义型残留，postprocess 无法覆盖。**postprocess 跑完后仍须人工通读一遍**。详见 `references/postprocess-residual-bugs.md`。
+- **Postprocess 报告"0 项需 AI"≠文件已可发布**：标题+正文粘连、跨段孤儿 `**`（段首有 `**` 但无段末闭合）、引流图片所在营销小节的连带删除等语义型残留，postprocess 无法覆盖。**实战残留样例（postprocess 报告 0 项需 AI 时仍出现）**：`## 功能特性- 手机遥控：浏览器扫码直连…`（标题直接粘连列表首项，须拆为 `## 功能特性\n\n- 手机遥控：…`）；`## 怎么用去 GitHub Releases 下最新版：`（标题粘连后续句子，须拆为 `## 怎么用\n\n去 GitHub Releases 下最新版：`）。**postprocess 跑完后仍须人工通读一遍**。详见 `references/postprocess-residual-bugs.md`。
+
+⚠️ **批量正则编辑正文时严防图片引用损坏（`](path)` 被吞）**：对文章正文做整体正则替换（如给图片后补空行、调整标题前空行）时，若替换串里写了 `]` 但漏掉 `(Clippings/images/xxx.png)`，会静默把 `![hash.png](Clippings/images/hash.png)` 变成 `![hash.png]`，图片引用丢失但正文不报错。**实战（2026-08-06）**：`re.sub(r"\]\(Clippings/images/[^)]+\)\n(### \d\.\d )", r"]\n\n\1", content)` 意图在图片后补空行，实际吞掉 8 处 `](path)`，图片引用从 32 掉到 24。
+> **修复**：用 `re.findall(r'!\[([a-f0-9]{32}\.(png|jpg|jpeg))\]\n', content)` 扫描 `![hash]` 后无 `(` 的损坏行，逐条 `replace(f"![{fn}]\n\n", f"![{fn}](Clippings/images/{fn})\n\n")` 补回路径。
+> **预防**：任何整体正则编辑后，立刻 `re.findall(r'!\[[a-f0-9]{32}\.(png|jpg|jpeg)\]\(Clippings/images/', content)` 统计引用数并与编辑前对比；发现减少立即排查，不要假设替换只动了目标行。
 
 ⚠️ **`execute_code` + `patch` 中文破折号陷阱**：在 `execute_code` 沙箱中使用 `patch()` 工具时，若 `old_string` 参数包含中文破折号 `—`（U+2014 em-dash），Python 沙箱会报 `SyntaxError: invalid character '—' (U+2014)`。这是 Python 字节序列与源码 UTF-8 解析的边界问题。**绕过方法**：使用 `read_file` 获取内容后在 `execute_code` 内部用纯字符串替换（`content.replace(old, new)`），而非通过 `patch()` 工具的参数传递。例如：
 ```python
@@ -687,7 +712,15 @@ content = content.replace("形成背景—信息—风险的研究闭环。", "�
 with open(f, 'w') as fp:
     fp.write(content)
 ```
+⚠️ **批量替换涉及图片行时，替换串必须保留完整图片语法，否则 `(path)` 被静默丢弃（高频、严重）**：用正则处理"图片与标题间插空行""图注与标题拆分"时，若匹配串含 `](Clippings/images/...)` 而替换串只留 `]`（如 `re.sub(r"\]\(Clippings/images/[^)]+\)\n(### \d)", r"]\n\n\1", ...)`），所有命中图片会退化为裸 `![hash.png]`——路径丢失，Obsidian 中图片静默消失（实战事故 2026-08-06：一次损坏 8 张图，靠引用计数 32→24 才发现）。
+> - **安全写法**：模式中对图片语法整体设捕获组并在替换串原样回引（`r"(!\[[^\]]+\]\(Clippings/images/[^)]+\))\n(### )" → r"\1\n\n\2"`）；或干脆不让匹配包含图片部分（按标题行定位插空行）。
+> - **验证纪律**：对文章内容的**任何**批量编辑后，立即重数图片引用（`re.findall(r'!\[[a-f0-9]{32}\.(?:png|jpg|jpeg)\]\(Clippings/images/', content)` 计数应等于编辑前数量减去有意删除的图）；数量不符必有损坏。图注/标题粘连家族与安全替换写法详见 `references/postprocess-residual-bugs.md` §13–14。
+
+⚠️ **代码块重度损坏（fence 逐行丢失、缩进全丢）** — 微信技术文代码块可能每个代码行都被 `` ` `` 包裹、fence 完全消失，postprocess 的行首修复覆盖不了。**修复：按稳定锚点整体重建代码块**（execute_code 定位起止标记 → 手工恢复缩进与 fence → 整体替换），勿逐行 patch。含验证脚本与伴生残留清理，详见 `references/code-block-heavy-reconstruction.md`。
+
 ⚠️ **代码块 fence 被拆分为多个独立 fence** — postprocess.py 有时会将同一个逻辑代码块在多个语言/章节标记处拆开，产生多个独立 fence。**修复**：人工检查相邻 fence 是否属于同一逻辑块，若是则手动合并。详见 `references/code-fence-merge-pitfall.md`。详见 `references/em-dash-patch-pitfall.md`。
+
+⚠️ **代码块 fence 仅修 opening 不修 closing（高频）** — postprocess.py 只负责将行首 language marker（`+Python`/`+Rust`）修复为 ```` ```python` / ```` ```rust` opening fence，**不会自动为每个 opening fence 补 closing ```` ``` ````**。微信代码块常因 inline code 紧贴正文（`return spread`逐块拆解：`）导致 closing fence 缺失，生成"4 个 opening、0 个 closing"的 Markdown，Obsidian 中所有后续内容被当作代码。**修复顺序**：先合并 fence+language 分离 → 再补缺失的 closing fence → 最后合并重复 fence。**必做**：postprocess 完成后，用 `references/code-fence-unclosed-verification.md` 的 fence 配对验证脚本确认 fences 总数为偶数且每对间隔合理，**不要假设 postprocess 已处理好 closing**。
 
 ⚠️ **`content_noencode` 模板变量 `{1}` / `{{img_url}}` 字面量残留**：当微信文章 HTML 源码本身包含模板变量（如 `{img_url}`、`{1}`）时，经过 `\\xHH` hex 解码后这些变量会作为字面量 `{1}`、`{{img_url}}` 残留在 Markdown 正文中。常见于代码块内引用 URL 变量的文章（如"addr 就是一个公钥标识"中的 `{1}`）。**修复**：人工搜索 `{1}` 或 `{{img_url}}` 字面量，替换为正确语义（如 ``addr``、`https://...` 等）。
 
@@ -702,8 +735,40 @@ postprocess.py 完成后再人工排查时，**始终用 `open(path).read()` 获
 
 runner.py 下载的图片**默认全部写入正文**，但 **postprocess.py 不做内容过滤**。因此 Agent 必须对**每一张下载的图片**使用 `vision_analyze` 进行视觉分析，按以下规则分类处理。
 
+> ⚠️ **预筛：统计引用次数分布（在 vision 之前做，可省掉大量冗余调用）**
+>
+> 微信长文常见一张装饰性分隔图被引用十几次到二十多次。若不加区分对 25 张唯一图逐张 vision，可能有 25+ 次在识别同一张图。
+>
+> **预筛方法**：先跑一次 `execute_code`，统计正文图片引用次数：
+> ```python
+> import re
+> from collections import Counter
+> c = Path("文章.md").read_text(encoding="utf-8")
+> refs = re.findall(r'\[([a-f0-9]{32}\.(?:png|jpg|jpeg))\]\(Clippings/images/', c)
+> for fname, n in Counter(refs).most_common():
+>     print(f"  {n:3d}×  {fname}")
+> ```
+> - 某文件出现次数≥10 次且明显断层 → **装饰图，直接删除**（跳过 vision）
+> - 文件数 ≪ 引用数 → 先删高频装饰图，再逐张 vision 剩余低频文件
+- 文件数 ≈ 引用数 → 逐张 vision
+
+> ⚠️ **孤立图片下载残留（2026-08-12 实战）**：runner.py 下载 14 张图片但正文仅嵌入 13 张——第 14 张（`cb50514c...jpg`）无任何 markdown 引用却静默留在 `Clippings/images/`。postprocess.py 的「图片引用统计」只计已嵌入的引用（报 13 处），不报已下载但未引用的孤立文件。**处理**：vision 批筛前，用 `execute_code` 扫描 `Clippings/images/`，比对已下载文件名与正文引用文件名集，差集中的文件即为孤立图——删除它们（`os.remove`），避免误判为"待 vision 的图片"。
+
+详细判定规则与实战案例见 `references/wechat-image-triage.md#统计型预筛`。
+
 **必做：全量视觉筛查**
 - 对 `Clippings/images/` 中该文章对应的**所有图片**，逐一调用 `vision_analyze`
+- **批量替代（推荐，省上下文）**：20+ 张图时用 `delegate_task` 委托一个子 agent（toolsets `["vision","file"]`）批量筛查，goal 里逐字写明全部绝对路径+判定标准+输出格式，返回紧凑判定表。详见 `references/batch-image-screening-and-orphan-sweep.md`。
+
+> ⚠️ **delegate_task 批量视觉筛图超时陷阱（2026-08-06 实战）**：77 张图委托子 agent 批量 vision 筛查，600s 超时只完成 7 次 API 调用即被中断，未返回任何判定表。**超时原因**：vision_analyze 是慢调用（每张数秒~数十秒），77 张线性串行远超出子 agent 的 600s 时限。**不要对 40+ 张图整体委托一遍**，会白等 10 分钟颗粒无收。
+>
+> **结构性回退（对研究报告/论文类文章可靠）**：当文章类型决定了图片构成时，跳过全量 vision，只对**边界/可疑图片**做定向 vision，其余按文章结构上下文判定：
+> - **正文中部图片**（公式图、回测净值曲线、相关系数热力图、架构图）→ 按文章结构判定为 CONTENT，保留——研究报告几乎不会在正文中部夹装饰图
+> - **带图注的图片是最强结构信号**：图片行后紧跟 `图：`/`表：` 说明行的，几乎必为内容图，可直接保留、跳过 vision（实战 2026-08-07：8 张图中 7 张带图注全部命中）；只对**无图注**的文首/文末图片做定向 vision
+> - **文首图片**（抓取后正文第一二张，位于摘要/投资要点后）→ 定向 vision，确认是封面图还是内容图
+> - **文末图片**（位于"关注公众号/往期链接/风险提示"等促销文本之后）→ 定向 vision，通常为装饰横幅/二维码/风险声明页，判定后删除
+> - 判定出 1~2 张可疑后，用 vision_analyze 定向确认即可，不必全部核验
+> 此回退在"文章类型预测图片构成"的研报上可靠，且比全量委托快得多；对插图类型不可预测的普通文章仍需逐张/小批量 vision。
 - 只有明确判定为「内容图」的图片才保留在正文中
 - 以下 6 类图片必须**删除引用 + 删除磁盘文件**：
   1. **封面图**：宽幅海报、品牌 logo、文章题图
@@ -746,6 +811,28 @@ vision_analyze(image_url, "请识别这张图片的类型：是封面图/题图�
   - 若内容含「关注公众号 / 加群 / 扫码」等引流特征，图片多为二维码/引流图 → **删除**；
   - 不确定时偏向保留，并请用户确认，不要凭空删除内容图。
 
+#### ⚠️ vision 模型配置诊断（2026-08-09 实战，先于兜底判定执行）
+
+当 `vision_analyze` 返回 `404 UnsupportedModel` / `does not support vision` 时，**不要立刻当作"当前模型不支持视觉"而走兜底**。先做两步诊断，常常能直接修好而无需兜底：
+
+1. **直测配置的视觉模型**（绕过 auxiliary 工具，用 curl/API 发 base64 图片确认模型能力）。以火山方舟为例：
+   ```bash
+   # 从 config.yaml auxiliary.vision 读 provider/model/base_url/api_key
+   curl -s -X POST "${VOLCANO_BASE_URL}/chat/completions" \
+     -H "Authorization: Bearer ${VOLCANO_API_KEY}" -H "Content-Type: application/json" \
+     -d '{"model":"minimax-m3","messages":[{"role":"user","content":[
+       {"type":"text","text":"描述这张图"},
+       {"type":"image_url","image_url":{"url":"data:image/png;base64,<b64>"}}]}],"max_tokens":100}'
+   ```
+   返回 200 且能描述内容 → 模型本身支持视觉，问题在调用链路。
+2. **检查运行中的 gateway 是否持有旧配置**：磁盘 `config.yaml` 的 mtime 若晚于 gateway 启动时间，运行进程加载的是修改前的配置。`ps aux | grep "<profile> gateway"` 看启动时间，对比 `stat -c '%y' config.yaml`。config 缓存按文件 mtime 自动失效，但**进程启动时已展开/持有旧模型值**时需重启 gateway 才生效：
+   ```bash
+   systemctl --user restart hermes-gateway-<profile>.service
+   ```
+   ⚠️ 重启会中断当前会话（agent 运行在该 gateway 内），属需用户确认的操作，不要擅自执行。
+
+**结论**：只有确认「配置的视觉模型本身确实不支持视觉」时，才走上面的结构性兜底判定。多数"vision 失败"其实是**运行中 gateway 的配置滞后**，重启后即恢复正常视觉筛查。
+
 #### 嵌入规则
 
 1. **匹配顺序**：runner 输出中的图片顺序 = 文章中的图片顺序（按文档顺序下载）
@@ -754,30 +841,44 @@ vision_analyze(image_url, "请识别这张图片的类型：是封面图/题图�
 4. **格式**：`![描述文字](../images/文件名.png)`（相对路径）
 5. **嵌入后验证**：用 `content.count('![](../images/')` 统计引用数，应与下载的非封面图片数一致
 
+> ⚠️ **图片目录是共用库，严禁全局删除非本文图片**：`Clippings/images/` 是**整个 vault 所有文章共享的图片库**，不是每篇文章独立目录。vision_analyze 判定某图不属于本文（封面/引流/装饰）时，**只能删除正文中对该图的引用（`replace` 掉 markdown 行）+ 从磁盘删除该文件本身**。
+>
+> **错误做法**：遍历 `os.listdir(images_dir)`，对不在本文引用列表中的文件一律 `os.remove()`。这会删除其他文章的全部配图（真实事故：一次操作误删 3165 张共用图片，大量文章引用断裂）。
+>
+> **正确做法**：
+> ```python
+> # 1. 从本文 .md 中提取所有图片引用
+> refs = re.findall(r'!\[([a-f0-9]{32}\.(?:png|jpg|jpeg))\]\(Clippings/images/', content)
+>
+> # 2. 仅对 vision_analyze 判定为"删除"的图片：先删引用再删文件
+> for fname in deleted_set:
+>     img_markdown = f"![{fname}](Clippings/images/{fname})"
+>     content = content.replace(img_markdown, "")
+>     if os.path.exists(f"Clippings/images/{fname}"):
+>         os.remove(f"Clippings/images/{fname}")
+> ```
+>
+> 视觉判断后如需删除图片，必须**逐张确认**该文件名只在本文被引用，且先移除正文引用再删除磁盘文件。**绝对不要**用 `os.listdir` + `if not in kept: os.remove()` 遍历整个 images/ 目录。
+
 ### 第 5 步：生成 LLM 摘要
 
 postprocess.py 不生成摘要。runner.py 内置的 LLM 摘要**偶尔会超时（HTTP 403 或 read timeout）**，此时 Agent 需自行判断是否生成了摘要：
 
 > LLM 调用网络策略：**默认直连（不使用代理）**；若直连因网络/连接/SSL 错误失败，自动回退到环境代理（HTTP_PROXY/HTTPS_PROXY）。认证类错误（401/限流）不会触发代理回退。
 >
-> ⚠️ **LLM 自动摘要超时是正常失败模式之一**：常见输出为 `LLM 走代理失败（<urlopen error timed out>），回退直连重试...` 随后 `LLM 直连也失败: <urlopen error timed out>` 或 `ℹ️ 未生成摘要`。这是摘要生成层故障，不是文章抓取失败。**不要重跑 runner.py 反复赌 LLM 恢复；直接执行手动摘要补全流程**：在 frontmatter 之后、正文之前插入 `> 📌 **文章要点**` 引用块，3~5 条，每条 30~50 字，聚焦核心结论、关键数据或方法论。完成后在 log/报告中注明“LLM 摘要超时，已由 Agent 手动补充”。
-
-- **摘要已生成**：文件中已有 `> 📌 **文章要点**` 段 → 跳过
-### 第 5 步：生成 LLM 摘要
-
-postprocess.py 不生成摘要。runner.py 内置的 LLM 摘要**偶尔会失败**，失败模式包括：
-
-- 网络不可达（直连和代理均报 `Network is unreachable`）— 这是网络层故障，不是配置问题
-- HTTP 限流（QPS 超限）
-- 认证失败（401）
-- read timeout / SSL 错误
-
-**无论哪种失败，runner.py 都会打印明确提示**（如 `⚠️ LLM 走代理仍失败` 或 `⚠️ LLM 被限流`）。Agent 根据终端输出判断失败原因，**不要误判为「LLM 未配置」**——未配置 API key 时 runner.py 会明确打印 `ℹ️ 未配置 API key，跳过 LLM 总结`，与网络故障是两条独立分支。
-
 ⚠️ **网络层故障（Network is unreachable）**：当终端同时出现 `LLM 直连失败（Network is unreachable）` 和 `LLM 走代理仍失败: Network is unreachable` 时，说明当前会话进程**完全无法出站访问 LLM API**。此时重跑 runner.py 无效，必须直接进入**手动补摘要**流程。详见 `references/llm-summary-network-fallback.md`。
 
-- **摘要已生成**：文件中已有 `> 📌 **文章要点**` 段 → 跳过
-- **摘要未生成**：文件中无 `> 📌` 段 → Agent 必须手动补摘要，**不要跳过**。插入到 frontmatter 之后、正文之前：
+**摘要处理的三种情况**（按优先级依次检查）：
+
+**① 摘要已生成且干净**：文件中已有 `> 📌 **文章要点**` 段，且每条 `> - ` 开头的内容都是具体的文章要点（非元指令）→ 跳过
+
+**② 摘要已生成但被思维链泄漏污染**（必须做）：文件中有 `> 📌 **文章要点**` 段，但 `> - **` 后面跟的是元指令（Role/Task/Format/Analyze/Thinking Process）而非具体要点。**此时不能跳过**。立即扫描并替换：
+- 搜索 `> - **Analyze the Request`、`> - **Role`、`> - **Task`、`> - **Format`、`> - **1.`、`> - **2.`、`> - Thinking Process:`、`> - *   Role:`、`> - **Analyze the Request:**`、`> - *   Task:` 等模式，任一命中即判定为污染
+- **关键特征**：`> - **` 后面是元指令关键词（Role/Task/Format/Analyze/Thinking Process）而非具体的文章要点内容
+- **修复**：删除被污染的摘要区块，替换为人工生成的 3~5 条具体要点（每条 30~50 字），插入到 frontmatter 之后、正文之前
+- 详见 `references/llm-summary-thinking-artifact.md`
+
+**③ 摘要未生成**：文件中无 `> 📌` 段 → Agent 必须手动补摘要，**不要跳过**。插入到 frontmatter 之后、正文之前：
 
 ```markdown
 ---
@@ -800,7 +901,9 @@ postprocess.py 不生成摘要。runner.py 内置的 LLM 摘要**偶尔会失败
 
 详见 `references/llm-summary-network-fallback.md`（网络不可达时的回退 SOP）与 `references/llm-summary-thinking-artifact.md`（思维链泄漏修复）。
 
-⚠️ **注意**：某些 LLM 模型（如 xunfei/astron-code-latest）在生成摘要时可能把思维链元指令（Role/Task/Format 等）渗入摘要。生成后务必检查 `> - **` 开头的是否为具体要点，发现元指令模式立即替换。详见 `references/llm-summary-thinking-artifact.md`。
+⚠️ **注意**：某些 LLM 模型（如 xunfei/astron-code-latest）在生成摘要时可能把思维链元指令（Role/Task/Format 等）渗入摘要。生成摘要后务必检查 `> - **` 开头的是否为具体要点；发现元指令模式（Role/Task/Format/Analyze/Thinking Process）或 **原始 Prompt 头部泄漏**（`> - **文章要点**\n> - Thinking Process:` / `> - *   Role:` / `> - **Analyze the Request:**` 等提示词模板字段本身被当作要点输出），立即替换为人工要点，3~5 条，30~50 字，聚焦核心结论。
+
+详见 `references/llm-summary-thinking-artifact.md`（思维链泄漏 + 原始 Prompt 头部泄漏两种模式的判定与修复）。
 
 ### 第 6 步：llm-wiki 入库（默认执行）
 
@@ -817,6 +920,7 @@ Wiki 路径：`Clippings/`（与文章目录一致，内含 `raw/articles/`、`e
 ⚠️ **文章已自带 frontmatter，llm-wiki 溯源字段不要再加第二个 `---` 块**：link2obsidian 生成的文件头部已有完整 frontmatter（`source/title/description/tags/created/url`）。llm-wiki 的 Ingest 步骤要求补 `ingested/sha256` 溯源字段——**直接追加到现有 frontmatter 内**（如插在 `url:` 行之后），切勿在文件最前面再写一个 `--- ... ---` 块，否则 Obsidian 会把两份 YAML 拼在一起导致解析异常。
   - **正则陷阱**：用 `^---\n(.*?)\n---\n` 切分 frontmatter 时，捕获组末尾的 `url:` 行**没有尾随换行**，因此 `re.sub(r'(url: .*\n)', ...)` 会**静默不匹配**。应锚定 closing `---`，即匹配 `url: ...RuQ---\n` 替换为 `url: ...RuQ\ningested: 2026-07-12\nsha256: <hex>\n---\n`（注意 `ingested` 前**不要**加 `-`，否则 YAML 会把它解析成列表项而非 frontmatter 键值对，导致 Obsidian 解析异常）。
   - `sha256` 计算范围：frontmatter 之后的正文（body），不含 frontmatter 本身。
+  - **`.replace('---', ..., 1)` 静默替换开头 `---` 的坑**：用 `re.match(r'^(---\n.*?\n---)\n', content)` 捕获 frontmatter 时，捕获组同时包含开头和结尾的 `---`。随后用 `fm.replace('---', ..., 1)` 注入字段会替换**开头的 `---`**（第一个出现的位置），导致 ingested/sha256 跑到 YAML 之外，而非插入在 url 行之后。正确写法：用正则**锚定结尾 `---`**，例如 `re.sub(r'(\nurl: .+)(\n---)', r'\1\ningested: 2026-08-05\nsha256: ...\n---', fm)`；或者用 `fm.rsplit('\n---', 1)` 分离结尾，插字段后拼接。
 
 **跳过条件**：文章过短（<500 字节）或纯推广/无实质内容时跳过。
 
@@ -864,7 +968,17 @@ grep -rn "英文缩写文件名" entities/ concepts/ comparisons/
 3. 修复 wiki 页面中的引用路径（更新为文章标题）
 4. 删除 Clippings/ 根目录原文件（如果已移动）
 
-详见 `references/post-ingest-verification.md`。
+- See references/post-ingest-verification.md.
+
+## References
+
+- references/single-source-tool-workflow.md — 单篇文章引入工具+方法论文档
+- references/wechat-title-and-heading-postprocessing.md — runner/postprocess 后常见的标题/正文粘连、标题内残留 `/Prototype` 等非语义斜杠、以及代码块 fence 语言标识分离残留。
+- references/code-fence-unclosed-verification.md — postprocess 只修 opening fence 不修 closing 的配对验证脚本与修复 SOP
+- references/code-fence-heading-swallow.md — URL 行尾反引号吞掉下一行 `## 02`/`## 03` 等章节标题的检测与修复
+- references/vision-model-verification.md — vision_analyze 报 `404 UnsupportedModel` 时先 curl 探测配置模型视觉能力，并排查「配置模型 ≠ 运行时模型」的配置漂移
+- references/wechat-inline-code-and-heading-artifacts.md — 行内代码首尾空格 + 全角标点前空格清理、`## 参考`/孤立「资料」标题残留、断言标点差异陷阱
+- references/github-repo-ingest.md — GitHub 仓库链接入库流程（区别于网页文章）：clone → 存本地参考目录 → 提炼 README 成 raw article → 建实体页 → 更新 index/log。runner.py 的 js_content 抽取不适用仓库链接
 
 ## 代理绕过（重要）
 

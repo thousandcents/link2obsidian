@@ -17,6 +17,7 @@ WeChat 文章的 HTML→Markdown 转换中，fenced code block 的 ``` 标记经
 | YAML Front Matter 连续合并 | `` `---``name: X``colors:``  primary: "#xxx"``---`` `` 等，整个 YAML 文档（含 `---` 起始符、缩进的 key-value）被 inline backtick 包裹合并成一行 | 提取整块文本，按 `` `` 拆分为独立行，重建为 ```yaml 多行 fenced block。注意恢复缩进层级（2/4 空格），移除 key 外侧多余引号 | `---``name: Heritage``colors:``  primary: "#1A1C1E"``  → ```yaml\n---\nname: Heritage\ncolors:\n  primary: "#1A1C1E"\n...\n``` |
 | 行内 URL 单反引号 | 行首 `` `地址：https://...` `` 或 `` `开源地址：https://...` `` 后紧接正文 | 不是代码块退化，是 URL 被 wrap 成 inline code。删除行首反引号，保留 URL 作为超链接文本，在 URL 行后插入 `\n\n` 分离后续正文 | `` `地址：https://github.com/xxx`和 Awesome Design.md`` → `地址：https://github.com/xxx\n\n和 Awesome Design.md` |
 | 代码块结尾粘连 | 闭合 ``` 后紧跟正文无换行，如 `}```四条命令分别干这几件事：` 或 `` ````如果你的项目已经用了 Tailwind`` | 在 ``` 后插入 `\n\n` 分离正文。检测：扫描 `\n```\n` 后是否紧接非空行且无换行 | `}```四条命令分别干这几件事：` → `}\n```\n\n四条命令分别干这几件事：` |
+| 多行代码块首尾双退化（Python 等） | **opening** 退化为单 `` ` `` 前缀粘在代码首行行首（如 `` `researcher = Agent( ``，后接数十行无 fence 的缩进代码）；**closing** 退化为单 `` ` `` 前缀粘在代码块后第一行**正文**的行首（如代码末行 `streamlit run travel_agent.py` 之后紧跟 `` `4 条命令，一个带 Web UI 的旅行规划 Agent 就跑起来了。 ``） | opening：行首 `` ` `` → ```` ```python\n ````（语言按内容判断）；closing：正文行首 `` ` `` → ```` \n```\n\n ````。两处须同轮修复，否则 fence 计数为奇数 | 见 2026-08-07 awesome-llm-apps 文章：bash 块与 Python 块均此形态 |
 
 ## 检测方法
 
@@ -27,7 +28,10 @@ WeChat 文章的 HTML→Markdown 转换中，fenced code block 的 ``` 标记经
    - `curl` / `npx` / `claude` / `hermes` / `git` → bash 命令
    - 中文/中文标点 → ASCII 流程图或对话
    - 代码标识符（字母/数字/下划线开头且有配对反引号）→ 内联代码，跳过
-3. 对于连续反引号合并模式（`line1``line2`），按 `` `` 分割后每段为单独行，整体围入 ```...``` 
+   - ⚠️ **代码标识符但同行无闭合反引号** → 不是内联代码，是**多行代码块的退化 opening fence**（如 `` `researcher = Agent( ``）。判别：看后续行是否为缩进的代码延续（参数行、`],`、`)` 等）；是则按「多行代码块首尾双退化」修复。切勿因「标识符开头」就套用内联代码规则跳过（2026-08-07 实战教训）
+3. **扫描 closing 侧**：代码块最后一行之后的第一行若以 `` ` `` 开头且后接完整句子（非代码），该 `` ` `` 就是退化的闭合 fence，改为 ```` ``` ```` + `\n\n`
+4. 对于连续反引号合并模式（`line1``line2`），按 `` `` 分割后每段为单独行，整体围入 ```...``` 
+5. **修复后必验**：`len(re.findall(r'^```', content, flags=re.M))` 为偶数，且每对 fence 间隔合理
 
 ## 注意事项
 
